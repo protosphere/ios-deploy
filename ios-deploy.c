@@ -325,8 +325,10 @@ CFStringRef copy_xcode_path_for(CFStringRef subPath, CFStringRef search) {
     if (!found) {
         path = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@/%@/%@"), xcodeDevPath, subPath, search);
         found = path_exists(path);
-        if (verbose && !found) {
-            NSLog(@"copy_xcode_path_for path not found: %@", path);
+        if (verbose) {
+            NSLog(@"copy_xcode_path_for:");
+            NSLog(@"\tpath: %@", path);
+            NSLog(@"\tfound: %d", found);
         }
     }
     // Try find `xcode-select --print-path` with search as a name pattern
@@ -338,24 +340,30 @@ CFStringRef copy_xcode_path_for(CFStringRef subPath, CFStringRef search) {
              path = find_path(CFStringCreateWithFormat(NULL, NULL, CFSTR("%@/%@"), xcodeDevPath, subPath), search, CFSTR(""));
         }
         found = CFStringGetLength(path) > 0 && path_exists(path);
-        if (verbose && !found) {
-            NSLog(@"copy_xcode_path_for path not found: %@", path);
+        if (verbose) {
+            NSLog(@"copy_xcode_path_for:");
+            NSLog(@"\tpath: %@", path);
+            NSLog(@"\tfound: %d", found);
         }
     }
     // If not look in the default xcode location (xcode-select is sometimes wrong)
     if (!found) {
         path = CFStringCreateWithFormat(NULL, NULL, CFSTR("/Applications/Xcode.app/Contents/Developer/%@&%@"), subPath, search);
         found = path_exists(path);
-        if (verbose && !found) {
-            NSLog(@"copy_xcode_path_for path not found: %@", path);
+        if (verbose) {
+            NSLog(@"copy_xcode_path_for:");
+            NSLog(@"\tpath: %@", path);
+            NSLog(@"\tfound: %d", found);
         }
     }
     // If not look in the users home directory, Xcode can store device support stuff there
     if (!found) {
         path = CFStringCreateWithFormat(NULL, NULL, CFSTR("%s/Library/Developer/Xcode/%@/%@"), home, subPath, search);
         found = path_exists(path);
-        if (verbose && !found) {
-            NSLog(@"copy_xcode_path_for path not found: %@", path);
+        if (verbose) {
+            NSLog(@"copy_xcode_path_for:");
+            NSLog(@"\tpath: %@", path);
+            NSLog(@"\tfound: %d", found);
         }
     }
 
