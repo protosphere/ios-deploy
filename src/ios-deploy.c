@@ -1019,7 +1019,7 @@ void setup_dummy_pipe_on_stdin(int pfd[2]) {
         perror("dup2 failed");
 }
 
-void setup_lldb(AMDeviceRef device, CFURLRef url) {
+void setup_lldb(AMDeviceRef device) {
     CFStringRef device_full_name = get_device_full_name(device),
     device_interface_name = get_device_interface_name(device);
 
@@ -1040,9 +1040,6 @@ void setup_lldb(AMDeviceRef device, CFURLRef url) {
 
     mount_developer_image(device);      // put debugserver on the device
     start_remote_debug_server(device);  // start debugserver
-    write_lldb_prep_cmds(device, url);   // dump the necessary lldb commands into a file
-
-    CFRelease(url);
 
     NSLogOut(@"[100%%] Connecting to remote debug server");
     NSLogOut(@"-------------------------");
@@ -1055,90 +1052,6 @@ void setup_lldb(AMDeviceRef device, CFURLRef url) {
     signal(SIGLLDB, lldb_finished_handler);
 
     parent = getpid();
-}
-
-void launch_debugger(AMDeviceRef device, CFURLRef url) {
-    setup_lldb(device, url);
-    int pid = fork();
-    if (pid == 0) {
-        signal(SIGHUP, SIG_DFL);
-        signal(SIGLLDB, SIG_DFL);
-        child = getpid();
-
-        int pfd[2] = {-1, -1};
-        if (isatty(STDIN_FILENO))
-            // If we are running on a terminal, then we need to bring process to foreground for input
-            // to work correctly on lldb's end.
-            bring_process_to_foreground();
-        else
-            // If lldb is running in a non terminal environment, then it freaks out spamming "^D" and
-            // "quit". It seems this is caused by read() on stdin returning EOF in lldb. To hack around
-            // this we setup a dummy pipe on stdin, so read() would block expecting "user's" input.
-            setup_dummy_pipe_on_stdin(pfd);
-
-        NSString* lldb_shell;
-		NSString* prep_cmds = [NSString stringWithFormat:PREP_CMDS_PATH, tmpUUID];
-		lldb_shell = [NSString stringWithFormat:LLDB_SHELL, prep_cmds];
-		
-        if(device_id != NULL) {
-			lldb_shell = [lldb_shell stringByAppendingString: [NSString stringWithUTF8String:device_id]];
-		}
-
-        int status = system([lldb_shell UTF8String]); // launch lldb
-        if (status == -1)
-            perror("failed launching lldb");
-
-        close(pfd[0]);
-        close(pfd[1]);
-
-        // Notify parent we're exiting
-        kill(parent, SIGLLDB);
-        // Pass lldb exit code
-        _exit(WEXITSTATUS(status));
-    } else if (pid > 0) {
-        child = pid;
-    } else {
-        on_sys_error(@"Fork failed");
-    }
-}
-
-void launch_debugger_and_exit(AMDeviceRef device, CFURLRef url) {
-    setup_lldb(device,url);
-    int pfd[2] = {-1, -1};
-    if (pipe(pfd) == -1)
-        perror("Pipe failed");
-    int pid = fork();
-    if (pid == 0) {
-        signal(SIGHUP, SIG_DFL);
-        signal(SIGLLDB, SIG_DFL);
-        child = getpid();
-
-        if (dup2(pfd[0],STDIN_FILENO) == -1)
-            perror("dup2 failed");
-
-
-        NSString* prep_cmds = [NSString stringWithFormat:PREP_CMDS_PATH, tmpUUID];
-		NSString* lldb_shell = [NSString stringWithFormat:LLDB_SHELL, prep_cmds];
-        if(device_id != NULL) {
-			lldb_shell = [lldb_shell stringByAppendingString:[NSString stringWithUTF8String:device_id]];
-		}
-
-        int status = system([lldb_shell UTF8String]); // launch lldb
-        if (status == -1)
-            perror("failed launching lldb");
-
-        close(pfd[0]);
-
-        // Notify parent we're exiting
-        kill(parent, SIGLLDB);
-        // Pass lldb exit code
-        _exit(WEXITSTATUS(status));
-    } else if (pid > 0) {
-        child = pid;
-        NSLogVerbose(@"Waiting for child [Child: %d][Parent: %d]\n", child, parent);
-    } else {
-        on_sys_error(@"Fork failed");
-    }
 }
 
 CFStringRef get_bundle_id(CFURLRef app_url)
@@ -1592,128 +1505,9 @@ void handle_device(AMDeviceRef device) {
     }
 
     NSLogOut(@"[....] Using %@.", device_full_name);
-
-    if (command_only) {
-        if (strcmp("list", command) == 0) {
-            list_files(device);
-        } else if (strcmp("upload", command) == 0) {
-            upload_file(device);
-        } else if (strcmp("download", command) == 0) {
-            download_tree(device);    
-        } else if (strcmp("mkdir", command) == 0) {
-            make_directory(device);
-        } else if (strcmp("rm", command) == 0) {
-            remove_path(device);
-        } else if (strcmp("exists", command) == 0) {
-            exit(app_exists(device));
-        } else if (strcmp("uninstall_only", command) == 0) {
-            uninstall_app(device);
-        } else if (strcmp("list_bundle_id", command) == 0) {
-            list_bundle_id(device);
-        }
-        exit(0);
-    }
-
-
     CFRetain(device); // don't know if this is necessary?
 
-    CFStringRef path = CFStringCreateWithCString(NULL, app_path, kCFStringEncodingUTF8);
-    CFURLRef relative_url = CFURLCreateWithFileSystemPath(NULL, path, kCFURLPOSIXPathStyle, false);
-    CFURLRef url = CFURLCopyAbsoluteURL(relative_url);
-
-    CFRelease(relative_url);
-
-    if (uninstall) {
-        NSLogOut(@"------ Uninstall phase ------");
-
-        //Do we already have the bundle_id passed in via the command line? if so, use it.
-        CFStringRef cf_uninstall_bundle_id = NULL;
-        if (bundle_id != NULL)
-        {
-            cf_uninstall_bundle_id = CFStringCreateWithCString(NULL, bundle_id, kCFStringEncodingUTF8);
-        } else {
-            cf_uninstall_bundle_id = get_bundle_id(url);
-        }
-
-        if (cf_uninstall_bundle_id == NULL) {
-            on_error(@"Error: Unable to get bundle id from user command or package %@.\nUninstall failed.", app_path);
-        } else {
-            AMDeviceConnect(device);
-            assert(AMDeviceIsPaired(device));
-            check_error(AMDeviceValidatePairing(device));
-            check_error(AMDeviceStartSession(device));
-
-            int code = AMDeviceSecureUninstallApplication(0, device, cf_uninstall_bundle_id, 0, NULL, 0);
-            if (code == 0) {
-                NSLogOut(@"[ OK ] Uninstalled package with bundle id %@", cf_uninstall_bundle_id);
-            } else {
-                on_error(@"[ ERROR ] Could not uninstall package with bundle id %@", cf_uninstall_bundle_id);
-            }
-            check_error(AMDeviceStopSession(device));
-            check_error(AMDeviceDisconnect(device));
-        }
-    }
-
-    if(install) {
-        NSLogOut(@"------ Install phase ------");
-        NSLogOut(@"[  0%%] Found %@ connected through %@, beginning install", device_full_name, device_interface_name);
-
-        AMDeviceConnect(device);
-        assert(AMDeviceIsPaired(device));
-        check_error(AMDeviceValidatePairing(device));
-        check_error(AMDeviceStartSession(device));
-
-
-        // NOTE: the secure version doesn't seem to require us to start the AFC service
-        service_conn_t afcFd;
-        check_error(AMDeviceSecureStartService(device, CFSTR("com.apple.afc"), NULL, &afcFd));
-        check_error(AMDeviceStopSession(device));
-        check_error(AMDeviceDisconnect(device));
-
-        CFStringRef keys[] = { CFSTR("PackageType") };
-        CFStringRef values[] = { CFSTR("Developer") };
-        CFDictionaryRef options = CFDictionaryCreate(NULL, (const void **)&keys, (const void **)&values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-
-        //assert(AMDeviceTransferApplication(afcFd, path, NULL, transfer_callback, NULL) == 0);
-        check_error(AMDeviceSecureTransferPath(0, device, url, options, transfer_callback, 0));
-
-        close(afcFd);
-
-
-
-        AMDeviceConnect(device);
-        assert(AMDeviceIsPaired(device));
-        check_error(AMDeviceValidatePairing(device));
-        check_error(AMDeviceStartSession(device));
-
-        // // NOTE: the secure version doesn't seem to require us to start the installation_proxy service
-        // // Although I can't find it right now, I in some code that the first param of AMDeviceSecureInstallApplication was a "dontStartInstallProxy"
-        // // implying this is done for us by iOS already
-
-        //service_conn_t installFd;
-        //assert(AMDeviceSecureStartService(device, CFSTR("com.apple.mobile.installation_proxy"), NULL, &installFd) == 0);
-
-        //mach_error_t result = AMDeviceInstallApplication(installFd, path, options, install_callback, NULL);
-        check_error(AMDeviceSecureInstallApplication(0, device, url, options, install_callback, 0));
-
-        // close(installFd);
-
-        check_error(AMDeviceStopSession(device));
-        check_error(AMDeviceDisconnect(device));
-
-        CFRelease(path);
-        CFRelease(options);
-
-        NSLogOut(@"[100%%] Installed package %@", [NSString stringWithUTF8String:app_path]);
-    }
-
-    if (!debug)
-        exit(0); // no debug phase
-
-    if (justlaunch)
-        launch_debugger_and_exit(device, url);
-    else
-        launch_debugger(device, url);
+    setup_lldb(device);
 }
 
 void device_callback(struct am_device_notification_callback_info *info, void *arg) {
@@ -1809,143 +1603,10 @@ int main(int argc, char *argv[]) {
     CFRelease(uuid);
     tmpUUID = [(NSString*)str autorelease];
 	
-    static struct option longopts[] = {
-        { "debug", no_argument, NULL, 'd' },
-        { "id", required_argument, NULL, 'i' },
-        { "bundle", required_argument, NULL, 'b' },
-        { "args", required_argument, NULL, 'a' },
-        { "verbose", no_argument, NULL, 'v' },
-        { "timeout", required_argument, NULL, 't' },
-        { "unbuffered", no_argument, NULL, 'u' },
-        { "nostart", no_argument, NULL, 'n' },
-        { "noninteractive", no_argument, NULL, 'I' },
-        { "justlaunch", no_argument, NULL, 'L' },
-        { "detect", no_argument, NULL, 'c' },
-        { "version", no_argument, NULL, 'V' },
-        { "noinstall", no_argument, NULL, 'm' },
-        { "port", required_argument, NULL, 'p' },
-        { "uninstall", no_argument, NULL, 'r' },
-        { "uninstall_only", no_argument, NULL, '9'},
-        { "list", optional_argument, NULL, 'l' },
-        { "bundle_id", required_argument, NULL, '1'},
-        { "upload", required_argument, NULL, 'o'},
-        { "download", optional_argument, NULL, 'w'},
-        { "to", required_argument, NULL, '2'},
-        { "mkdir", required_argument, NULL, 'D'},
-        { "rm", required_argument, NULL, 'R'},
-        { "exists", no_argument, NULL, 'e'},
-        { "list_bundle_id", no_argument, NULL, 'B'},
-        { NULL, 0, NULL, 0 },
-    };
-    char ch;
-
-    while ((ch = getopt_long(argc, argv, "VmcdvunrILeD:R:i:b:a:t:g:x:p:1:2:o:l::w::9::B::", longopts, NULL)) != -1)
-    {
-        switch (ch) {
-        case 'm':
-            install = 0;
-            debug = 1;
-            break;
-        case 'd':
-            debug = 1;
-            break;
-        case 'i':
-            device_id = optarg;
-            break;
-        case 'b':
-            app_path = optarg;
-            break;
-        case 'a':
-            args = optarg;
-            break;
-        case 'v':
-            verbose = 1;
-            break;
-        case 't':
-            _timeout = atoi(optarg);
-            break;
-        case 'u':
-            unbuffered = 1;
-            break;
-        case 'n':
-            nostart = 1;
-            break;
-        case 'I':
-            interactive = false;
-            debug = 1;
-            break;
-        case 'L':
-            interactive = false;
-            justlaunch = true;
-            debug = 1;
-            break;
-        case 'c':
-            detect_only = true;
-            debug = 1;
-            break;
-        case 'V':
-            show_version();
-            return 0;
-        case 'p':
-            port = atoi(optarg);
-            break;
-        case 'r':
-            uninstall = 1;
-            break;
-        case '9':
-            command_only = true;
-            command = "uninstall_only";
-            break;
-        case '1':
-            bundle_id = optarg;
-            break;
-        case '2':
-            target_filename = optarg;
-            break;
-        case 'o':
-            command_only = true;
-            upload_pathname = optarg;
-            command = "upload";
-            break;
-        case 'l':
-            command_only = true;
-            command = "list";
-            list_root = optarg;
-            break;
-        case 'w':
-            command_only = true;
-            command = "download";
-            list_root = optarg;
-            break;
-        case 'D':
-            command_only = true;
-            target_filename = optarg;
-            command = "mkdir";
-            break;
-        case 'R':
-            command_only = true;
-            target_filename = optarg;
-            command = "rm";
-            break;
-        case 'e':
-            command_only = true;
-            command = "exists";
-            break;
-        case 'B':
-            command_only = true;
-            command = "list_bundle_id";
-            break;
-        default:
-            usage(argv[0]);
-            return exitcode_error;
-        }
-    }
-
-    if (!app_path && !detect_only && !command_only) {
-        usage(argv[0]);
-        on_error(@"One of -[b|c|o|l|w|D|R|e|9] is required to proceed!");
-    }
-
+    install = 0;
+    debug = 1;
+    port = 10000;
+    
     if (unbuffered) {
         setbuf(stdout, NULL);
         setbuf(stderr, NULL);
@@ -1953,12 +1614,6 @@ int main(int argc, char *argv[]) {
 
     if (detect_only && _timeout == 0) {
         _timeout = 5;
-    }
-
-    if (app_path) {
-        if (access(app_path, F_OK) != 0) {
-            on_sys_error(@"Can't access app path '%@'", [NSString stringWithUTF8String:app_path]);
-        }
     }
 
     AMDSetLogLevel(5); // otherwise syslog gets flooded with crap
